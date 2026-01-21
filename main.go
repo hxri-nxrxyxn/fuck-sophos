@@ -16,13 +16,12 @@ import (
 )
 
 const (
-	portalURL         = "http://10.10.10.100:8090/login.xml"
-	keepaliveURL      = "http://10.10.10.100:8090/live"
-	refererURL        = "http://10.10.10.100:8090/httpclient.html"
-	loginInterval     = 55 * time.Minute
-	keepaliveInterval = 5 * time.Minute
-	retryDelay        = 2 * time.Minute
-	serviceName       = "sophos-autologin"
+	portalLoginURL    = "http://10.10.10.100:8090/login.xml"
+	portalLogoutURL   = "http://10.10.10.100:8090/logout.xml"
+	refererURL        = "http://10.10.10.100:8090/"
+	reloginInterval   = 30 * time.Minute // Logout + Login every 30 minutes
+	retryDelay        = 30 * time.Second // Quick retry on failure
+	serviceName       = "fuck-sophos"
 )
 
 // ANSI color codes
@@ -51,6 +50,9 @@ var greetings = []string{
 	"Rolling the dice of network connectivity...",
 	"Sliding into the portal's DMs...",
 	"Offering a sacrifice to the ping gods...",
+	"Respectfully requesting internet access...",
+	"Politely asking the firewall to step aside...",
+	"Establishing connection to the series of tubes...",
 }
 
 const banner = `
@@ -66,7 +68,7 @@ const banner = `
 `
 
 const systemdServiceTemplate = `[Unit]
-Description=Sophos Captive Portal Auto-Login
+Description=Fuck Sophos Captive Portal Auto-Login
 After=network-online.target
 Wants=network-online.target
 
@@ -126,13 +128,13 @@ func main() {
 	fmt.Print(colorCyan + banner + colorReset)
 	fmt.Println()
 
-	fmt.Printf("%sStarting Sophos Auto-Login%s\n", colorGreen, colorReset)
+	fmt.Printf("%sFuck Sophos - Never Lose Internet%s\n", colorGreen, colorReset)
 	fmt.Printf("%sUser: %s%s\n", colorGray, config.Username, colorReset)
-	fmt.Printf("%sPortal: %s%s\n\n", colorGray, portalURL, colorReset)
+	fmt.Printf("%sPortal: %s%s\n\n", colorGray, portalLoginURL, colorReset)
 
 	if config.OnceMode {
 		fmt.Printf("%sRunning in once mode - will login once and exit%s\n", colorYellow, colorReset)
-		if err := performLogin(config.Username, config.Password); err != nil {
+		if err := performLogoutLogin(config.Username, config.Password); err != nil {
 			log.Fatalf("Login failed: %v", err)
 		}
 		fmt.Printf("%sLogin successful!%s\n", colorGreen, colorReset)
@@ -140,32 +142,39 @@ func main() {
 	}
 
 	// Initial login
-	if err := performLogin(config.Username, config.Password); err != nil {
-		fmt.Printf("Initial login failed: %v. Will retry in %v\n", err, retryDelay)
+	if err := performLogoutLogin(config.Username, config.Password); err != nil {
+		fmt.Printf("%sInitial login failed: %v%s\n", colorRed, err, colorReset)
+		fmt.Printf("%sRetrying in %v...%s\n", colorYellow, retryDelay, colorReset)
+		time.Sleep(retryDelay)
+		if err := performLogoutLogin(config.Username, config.Password); err != nil {
+			log.Fatalf("Retry failed: %v. Cannot continue.", err)
+		}
 	}
 
-	// Start dual-ticker system
-	keepaliveTicker := time.NewTicker(keepaliveInterval)
-	loginTicker := time.NewTicker(loginInterval)
-	defer keepaliveTicker.Stop()
-	defer loginTicker.Stop()
+	// Start re-login loop
+	ticker := time.NewTicker(reloginInterval)
+	defer ticker.Stop()
 
-	fmt.Printf("%sAuto-login enabled:%s\n", colorGreen, colorReset)
-	fmt.Printf("%s  - Keepalive every %v%s\n", colorGray, keepaliveInterval, colorReset)
-	fmt.Printf("%s  - Full re-login every %v%s\n\n", colorGray, loginInterval, colorReset)
+	fmt.Printf("%sAuto re-login enabled:%s\n", colorGreen, colorReset)
+	fmt.Printf("%s  - Logout + Login cycle every %v%s\n", colorGray, reloginInterval, colorReset)
+	fmt.Printf("%s  - Aggressive retry on any failure%s\n\n", colorGray, colorReset)
 
-	for {
-		select {
-		case <-keepaliveTicker.C:
-			if err := performKeepalive(config.Username); err != nil {
-				fmt.Printf("Keepalive failed: %v\n", err)
-			}
-		case <-loginTicker.C:
-			if err := performLogin(config.Username, config.Password); err != nil {
-				fmt.Printf("Re-login failed: %v. Will retry in %v\n", err, retryDelay)
+	for range ticker.C {
+		if err := performLogoutLogin(config.Username, config.Password); err != nil {
+			fmt.Printf("%sRe-login failed: %v%s\n", colorRed, err, colorReset)
+			
+			// Immediate retry on failure
+			for i := 1; i <= 3; i++ {
+				fmt.Printf("%sRetry attempt %d/%d in %v...%s\n", colorYellow, i, 3, retryDelay, colorReset)
 				time.Sleep(retryDelay)
-				if err := performLogin(config.Username, config.Password); err != nil {
-					fmt.Printf("Retry failed: %v. Will wait until next scheduled login\n", err)
+				
+				if err := performLogoutLogin(config.Username, config.Password); err == nil {
+					fmt.Printf("%sRetry successful!%s\n", colorGreen, colorReset)
+					break
+				}
+				
+				if i == 3 {
+					fmt.Printf("%sAll retries failed. Will try again at next scheduled interval.%s\n", colorRed, colorReset)
 				}
 			}
 		}
@@ -304,14 +313,67 @@ func timestamp() string {
 	return time.Now().Format("15:04:05")
 }
 
+func performLogoutLogin(username, password string) error {
+	// First, try to logout (ignore errors as we might not be logged in)
+	performLogout(username)
+	
+	// Small delay between logout and login
+	time.Sleep(500 * time.Millisecond)
+	
+	// Now perform fresh login
+	if err := performLogin(username, password); err != nil {
+		return err
+	}
+	
+	// Verify internet connectivity
+	time.Sleep(1 * time.Second) // Give the portal a moment to activate
+	if err := verifyInternetConnectivity(); err != nil {
+		return fmt.Errorf("login succeeded but internet not working: %w", err)
+	}
+	
+	return nil
+}
+
+func performLogout(username string) {
+	fmt.Printf("%s[%s]%s Logging out...\n", colorGray, timestamp(), colorReset)
+
+	ts := time.Now().UnixMilli()
+
+	formData := url.Values{
+		"mode":        {"193"},
+		"username":    {username},
+		"a":           {fmt.Sprintf("%d", ts)},
+		"producttype": {"0"},
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	req, err := http.NewRequest("POST", portalLogoutURL, strings.NewReader(formData.Encode()))
+	if err != nil {
+		return // Ignore logout errors
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Referer", refererURL)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return // Ignore logout errors
+	}
+	defer resp.Body.Close()
+
+	fmt.Printf("%s[%s]%s Logged out\n", colorGray, timestamp(), colorReset)
+}
+
 func performLogin(username, password string) error {
 	greeting := randomGreeting()
 	fmt.Printf("%s[%s]%s %s\n", colorGray, timestamp(), colorReset, greeting)
 
-	// Generate timestamp (milliseconds since epoch)
 	ts := time.Now().UnixMilli()
 
-	// Prepare form data
 	formData := url.Values{
 		"mode":        {"191"},
 		"username":    {username},
@@ -320,45 +382,34 @@ func performLogin(username, password string) error {
 		"producttype": {"0"},
 	}
 
-	// Create HTTP client with timeout
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
 
-	// Create the request
-	req, err := http.NewRequest("POST", portalURL, strings.NewReader(formData.Encode()))
+	req, err := http.NewRequest("POST", portalLoginURL, strings.NewReader(formData.Encode()))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Add headers
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", "http://10.10.10.100:8090")
-	req.Header.Set("Referer", refererURL)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Referer", refererURL)
 
-	// Send request
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Check response status
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Check for failure indicators
 	bodyStr := string(body)
 	if strings.Contains(strings.ToLower(bodyStr), "failed") ||
 		strings.Contains(strings.ToLower(bodyStr), "error") ||
@@ -366,58 +417,37 @@ func performLogin(username, password string) error {
 		return fmt.Errorf("login rejected: %s", bodyStr)
 	}
 
-	fmt.Printf("%s[%s]%s Login successful\n", colorGray, timestamp(), colorReset)
+	fmt.Printf("%s[%s]%s %sLogin successful%s\n", colorGray, timestamp(), colorReset, colorGreen, colorReset)
 	return nil
 }
 
-func performKeepalive(username string) error {
-	fmt.Printf("%s[%s]%s Sending keepalive ping...\n", colorGray, timestamp(), colorReset)
-
-	// Generate timestamp
-	ts := time.Now().UnixMilli()
-
-	// Build keepalive URL
-	keepaliveReq := fmt.Sprintf("%s?mode=192&username=%s&a=%d&producttype=0",
-		keepaliveURL,
-		url.QueryEscape(username),
-		ts)
-
-	// Create HTTP client
+func verifyInternetConnectivity() error {
+	fmt.Printf("%s[%s]%s Verifying internet connectivity...\n", colorGray, timestamp(), colorReset)
+	
+	// Try to reach common reliable endpoints
+	testURLs := []string{
+		"http://1.1.1.1",
+		"http://8.8.8.8",
+		"http://www.google.com",
+	}
+	
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 5 * time.Second,
 	}
-
-	// Create request
-	req, err := http.NewRequest("GET", keepaliveReq, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create keepalive request: %w", err)
+	
+	for _, testURL := range testURLs {
+		req, err := http.NewRequest("GET", testURL, nil)
+		if err != nil {
+			continue
+		}
+		
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			fmt.Printf("%s[%s]%s %sInternet is working%s\n", colorGray, timestamp(), colorReset, colorGreen, colorReset)
+			return nil
+		}
 	}
-
-	// Add headers
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Referer", refererURL)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36")
-
-	// Send request
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("keepalive request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read keepalive response: %w", err)
-	}
-
-	// Check status
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("keepalive HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	fmt.Printf("%s[%s]%s Keepalive sent\n", colorGray, timestamp(), colorReset)
-	return nil
+	
+	return fmt.Errorf("cannot reach external internet")
 }
